@@ -1,0 +1,910 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>League of Legends Performance Review</title>
+    <!-- Load Tailwind CSS -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.2/dist/chart.umd.min.js"></script>
+    <!-- Load Chart.js for the Surrender Curve chart -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.2/dist/chart.umd.min.js"></script>
+    <style>
+        /* Custom styles based on LoL theme */
+        :root {
+            --bg-primary: #0A1428;
+            --bg-card: #1E2838;
+            --accent-gold: #C8AA6E;
+            --text-primary: #F0E6D2;
+            --success-green: #53A653;
+            --failure-red: #C0392B;
+            --champ-display: #CE7A42;
+        }
+
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: var(--bg-primary);
+            color: var(--text-primary);
+        }
+
+        /* Utility for the LoL-themed shadow/glow */
+        .gold-glow {
+            box-shadow: 0 0 10px var(--accent-gold);
+        }
+
+        .input-style {
+            background-color: #0A1428; /* Darker input background */
+            border: 1px solid #3d4a5c;
+            color: var(--text-primary);
+        }
+
+        .input-style:focus {
+            outline: none;
+            border-color: var(--accent-gold);
+            box-shadow: 0 0 5px var(--accent-gold);
+        }
+
+        /* Scrollbar styling for a cleaner look */
+        ::-webkit-scrollbar {
+            width: 8px;
+        }
+        ::-webkit-scrollbar-thumb {
+            background: var(--accent-gold);
+            border-radius: 4px;
+        }
+        ::-webkit-scrollbar-track {
+            background: var(--bg-card);
+        }
+
+    </style>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        'lol-bg': 'var(--bg-primary)',
+                        'lol-card': 'var(--bg-card)',
+                        'lol-gold': 'var(--accent-gold)',
+                        'lol-text': 'var(--text-primary)',
+                        'lol-success': 'var(--success-green)',
+                        'lol-failure': 'var(--failure-red)',
+                        'lol-champ': 'var(--champ-display)',
+                    }
+                }
+            }
+        }
+    </script>
+</head>
+<body class="min-h-screen p-4 sm:p-8">
+
+    <div id="app" class="max-w-7xl mx-auto">
+
+        <!-- The content will be rendered here (Homepage or Results Page) -->
+
+    </div>
+
+    <script>
+        // --- CONSTANTS ---
+        // Placeholder URL for the AWS Lambda endpoint
+        const LAMBDA_ENDPOINT = "https://tvxaxr2sjquvnr2og6gxfofrje0onaoo.lambda-url.us-east-1.on.aws/";
+        const REGIONS = ['euw1', 'na1', 'br1', 'la1', 'la2', 'eun1', 'tr1', 'ru', 'kr', 'jp1', 'oc1', 'ph2', 'sg2', 'th2', 'tw2', 'vn2'];
+
+        // Maps API keys to human-readable titles
+        const METRIC_TITLES = {
+            pings: {
+                title: "Pings - Communication & Strategy",
+                metrics: {
+                    totalPings: "Total Pings (per Min)",
+                    allInPingsPerMins: "All In Pings (per Min)",
+                    assistMePingsPerMins: "Assist Me Pings (per Min)",
+                    commandPingsPerMins: "Command Pings (per Min)",
+                    enemyMissingPingsPerMins: "Enemy Missing Pings (per Min)",
+                    enemyVisionPingsPerMins: "Enemy Vision Pings (per Min)",
+                    holdPingsPerMins: "Hold Pings (per Min)",
+                    getBackPingsPerMins: "Get Back Pings (per Min)",
+                    needVisionPingsPerMins: "Need Vision Pings (per Min)",
+                    onMyWayPingsPerMins: "On My Way Pings (per Min)",
+                    pushPingsPerMins: "Push Pings (per Min)",
+                    basicPingsPerMins: "Basic Pings (per Min)",
+                    visionClearedPingsPerMins: "Vision Cleared Pings (per Min)",
+                }
+            },
+            kda: {
+                title: "KDA - Combat & Contribution",
+                metrics: {
+                    kda: "KDA Ratio",
+                    kills: "Kills",
+                    deaths: "Deaths",
+                    assists: "Assists"
+                }
+            },
+            damage: {
+                title: "Damage - Objective & Champion Pressure",
+                metrics: {
+                    damageDealtToObjectives: "Damage Dealt to Objectives",
+                    damageDealtToTowers: "Damage Dealt to Towers",
+                    magicalDamageToChampions: "Magical Damage to Champs",
+                    physicalDamageToChampions: "Physical Damage to Champs",
+                    totalDamageToChampions: "Total Damage to Champs"
+                }
+            },
+            multiKills: {
+                title: "Multi Kills",
+                metrics: {}, // Custom renderer
+                section_illustration: "https://riot-recommendation-webpages.s3.us-east-1.amazonaws.com/webpages/sections/multiKills.png"
+            },
+            gameDuration: {
+                title: "Game Duration",
+                metrics: {}, // Custom renderer
+                section_illustration: "https://riot-recommendation-webpages.s3.us-east-1.amazonaws.com/webpages/sections/gameDuration.png"
+            },
+            surrenders: { title: "Surrenders", metrics: {}, section_illustration: "https://riot-recommendation-webpages.s3.us-east-1.amazonaws.com/webpages/sections/surrenders.png" }, // Custom renderer
+            tips: { title: "Pro Tips - Next Level Play", metrics: {}, section_illustration: "https://riot-recommendation-webpages.s3.us-east-1.amazonaws.com/webpages/sections/tips.png" } // New section
+        };
+
+        let currentState = {
+            view: 'home', // 'home' or 'results'
+            playerData: null,
+            loading: false,
+            error: null
+        };
+
+        const appDiv = document.getElementById('app');
+
+        // --- UTILITY: EXPONENTIAL BACKOFF FETCH ---
+        async function fetchWithRetry(url, options, maxRetries = 3) {
+            for (let i = 0; i < maxRetries; i++) {
+                try {
+                    const response = await fetch(url, options);
+
+                    if (response.ok) {
+                        return response.json();
+                    } else if (response.status === 404) {
+                        // For 404, don't retry, just throw a specific error
+                        throw new Error("Player not found or invalid region/tag combination.");
+                    } else {
+                        // For other non-OK statuses (e.g., 5xx), retry
+                        throw new Error(`HTTP error! Status: ${response.status}`);
+                    }
+                } catch (error) {
+                    if (i === maxRetries - 1) {
+                        // If this was the last attempt, rethrow the error
+                        throw error;
+                    }
+                    // Wait with exponential backoff before retrying
+                    const delay = Math.pow(2, i) * 1000 + (Math.random() * 1000); // 1s, 2s, 4s + jitter
+                    await new Promise(resolve => setTimeout(resolve, delay));
+                }
+            }
+        }
+
+        // --- NAVIGATION & STATE MANAGEMENT ---
+
+        function navigate(view, data = null) {
+            if (view === 'home') {
+                currentState.loading = false;
+
+                const button = document.getElementById('validate-button');
+                if (button) {
+                    button.disabled = false;
+                    button.innerHTML = 'SEARCH FOR GLORY';
+                }
+            }
+            currentState.view = view;
+            currentState.playerData = data;
+            renderApp();
+        }
+
+        async function fetchPlayerStats(username, tag, region) {
+            currentState.loading = true;
+            currentState.error = null;
+            renderApp();
+
+            // Construct the URL with query parameters
+            const apiUrl = `${LAMBDA_ENDPOINT}?username=${encodeURIComponent(username)}&tag=${encodeURIComponent(tag)}&region=${encodeURIComponent(region)}`;
+
+            let data;
+            try {
+                // Fetch data from the AWS Lambda endpoint
+                data = await fetchWithRetry(apiUrl, { method: 'GET' });
+
+                if (!data || Object.keys(data).length === 0) {
+                    throw new Error("No data found for this player. Check username/tag/region.");
+                }
+
+                navigate('results', data);
+
+            } catch (error) {
+                console.error("Fetch error:", error);
+                currentState.error = error.message || "A network error occurred while fetching data.";
+                currentState.loading = false;
+                renderApp();
+            }
+        }
+
+        // --- RENDER FUNCTIONS (HELPER) ---
+
+        /** Renders a section with comparison data for a given metric (e.g., Kills, Total Pings) */
+        function renderComparisonMetric(metricKey, championStats, metricTitle) {
+            const gameStates = ['win', 'loose'];
+
+            const stateBlocks = gameStates.map(gameType => {
+                const title = gameType === 'win' ? "Game State: WIN" : "Game State: LOOSE";
+                const titleColor = gameType === 'win' ? 'text-lol-success' : 'text-lol-failure';
+
+                const championDivs = championStats.map(stat => {
+                    const data = stat[gameType];
+                    // Skip if the specific game state data is missing or incomplete
+                    if (!data || !data.playerStats || !data.challengerStats) return '';
+
+                    const playerAvg = data.playerStats.average;
+                    const challengerAvg = data.challengerStats.average;
+
+                    // Handle division by zero/zero data
+                    const comparisonValue = Math.max(playerAvg, challengerAvg, 1);
+
+                    // Determine color and performance text
+                    let colorClass, performanceText;
+                    if (playerAvg > challengerAvg) {
+                        colorClass = 'bg-lol-success';
+                        performanceText = 'EXCEEDING CHALLENGER AVERAGE';
+                    } else if (playerAvg < challengerAvg) {
+                        colorClass = 'bg-lol-failure';
+                        performanceText = 'BELOW CHALLENGER AVERAGE';
+                    } else {
+                        colorClass = 'bg-lol-gold';
+                        performanceText = 'MEETING CHALLENGER AVERAGE';
+                    }
+
+                    // Calculate bar widths (relative to the highest of the two averages)
+                    const playerWidth = (playerAvg / comparisonValue) * 100;
+                    const challengerWidth = (challengerAvg / comparisonValue) * 100;
+
+                    return `
+                        <div class="p-3 border-b border-lol-card last:border-b-0">
+                            <div class="flex flex-wrap items-center space-x-4 mb-2">
+                                <span class="font-bold text-lol-champ w-32 text-xl">${stat.champion}</span>
+                                <span class="text-xs uppercase text-gray-400 w-16">${stat.lane}</span>
+                                <span class="text-xs font-semibold ${colorClass} p-1 rounded-full">${performanceText}</span>
+                            </div>
+
+                            <!-- Visualization Bar -->
+                            <div class="grid grid-cols-1 md:grid-cols-2 gap-4 text-sm mt-2">
+                                <div>
+                                    <span class="text-gray-300">Your Avg: ${playerAvg.toFixed(1)}</span>
+                                    <div class="w-full bg-gray-700 rounded-full h-2.5 mt-1">
+                                        <div class="h-2.5 rounded-full ${colorClass}" style="width: ${playerWidth.toFixed(2)}%"></div>
+                                    </div>
+                                </div>
+                                <div>
+                                    <span class="text-gray-400">Challenger Avg: ${challengerAvg.toFixed(1)}</span>
+                                    <div class="w-full bg-gray-700 rounded-full h-2.5 mt-1">
+                                        <div class="h-2.5 rounded-full bg-lol-gold" style="width: ${challengerWidth.toFixed(2)}%"></div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <!-- Quartile Data -->
+                            <div class="grid grid-cols-6 gap-2 mt-3 text-xs text-center border-t border-gray-700 pt-2">
+                                <div class="font-bold">Q1</div>
+                                <div class="font-bold">Median</div>
+                                <div class="font-bold">Q3</div>
+                                <div class="font-bold">Q1 (Challenger)</div>
+                                <div class="font-bold">Median (Challenger)</div>
+                                <div class="font-bold">Q3 (Challenger)</div>
+                                <div>${data.playerStats.q1?.toFixed(3) || 'N/A'}</div>
+                                <div>${data.playerStats.median?.toFixed(3) || 'N/A'}</div>
+                                <div>${data.playerStats.q3?.toFixed(3) || 'N/A'}</div>
+                                <div class="text-lol-gold">${data.challengerStats.q1?.toFixed(3) || 'N/A'}</div>
+                                <div class="text-lol-gold">${data.challengerStats.median?.toFixed(3) || 'N/A'}</div>
+                                <div class="text-lol-gold">${data.challengerStats.q3?.toFixed(3) || 'N/A'}</div>
+                            </div>
+                        </div>
+                    `;
+                }).join('');
+
+                // Only return the block if it contains actual data
+                return championDivs ? `
+                    <div class="bg-gray-800/50 p-3 rounded-md">
+                        <h5 class="${titleColor} font-bold mb-2">${title}</h5>
+                        ${championDivs}
+                    </div>
+                ` : '';
+            }).join('');
+
+
+            return `
+                <div class="bg-lol-card p-4 rounded-lg shadow-xl mb-4">
+                    <div class="flex items-center gap-2 mb-4 border-b border-gray-700 pb-2">
+                        <h4 class="text-xl font-semibold text-lol-gold">${metricTitle}</h4>
+                        <img src="https://riot-recommendation-webpages.s3.us-east-1.amazonaws.com/webpages/sections/${metricKey}.png" alt="Icon" class="w-6 h-6">
+                    </div>
+                    <div class="space-y-4">
+                        ${stateBlocks}
+                    </div>
+                </div>
+            `;
+        }
+
+        /**
+         * Renders the Multi Kills section in a card-based format as requested.
+         */
+        function renderMultiKillsSection(sectionData, sectionTitle, section_illustration) {
+            if (!sectionData || sectionData.length === 0) return '';
+
+            // Helper to render one row (e.g., "Double Kill: xxxx vs yyyyy")
+            // Shows WIN stats by default as per mockup
+            const renderKillRow = (label, playerStats, challengerStats) => {
+                if (!playerStats || !challengerStats) {
+                    return `<div>${label}: N/A</div>`; // Handle missing win/loose data
+                }
+                const playerVal = (playerStats[label] || 0).toFixed(2);
+                const challVal = (challengerStats[label] || 0).toFixed(2);
+
+                return `
+                    <div class="flex justify-between items-center text-lg">
+                        <span class="text-lol-text">${label.replace('s', '')}:</span>
+                        <span class="font-mono">
+                            <span class="text-lol-champ font-bold">${playerVal}</span>
+                            <span class="text-gray-500 mx-2">vs</span>
+                            <span class="text-lol-gold font-bold">${challVal}</span>
+                        </span>
+                    </div>
+                `;
+            };
+
+            const championCards = sectionData.map(stat => {
+                // We will display WIN stats as per the simple mockup.
+                // A more complex view could have tabs for WIN/LOOSE.
+                const winPlayer = stat.win?.playerStats;
+                const winChall = stat.win?.challengerStats;
+                const loosePlayer = stat.loose?.playerStats;
+                const looseChall = stat.loose?.challengerStats;
+
+                return `
+                    <div class="bg-lol-card p-6 rounded-lg shadow-xl">
+                        <div class="flex justify-between items-center mb-2">
+                            <div>
+                                <h3 class="text-xl font-bold text-disp text-lol-champ">${stat.champion}</h3>
+                                <p class="text-sm text-gray-400 uppercase mb-4">${stat.lane}</p>
+                            </div>
+                            <div>
+                                <p class="text-sm">Average kill categories per game.</p>
+                            </div>
+                        </div>
+
+                        <!-- WIN Stats -->
+                        ${winPlayer ? `
+                            <div class="mb-3">
+                                <div class="flex justify-between items-center mb-2">
+                                    <h4 class="text-lol-success font-bold">WIN</h4>
+                                    <span>
+                                        <span class="text-lol-champ">Yours</span>
+                                        <span> vs </span>
+                                        <span class="text-lol-gold">Challengers</span>
+                                    </span>
+                                </div>
+                                <div class="space-y-2 pl-4 border-l-2 border-lol-success">
+                                    ${renderKillRow('doubleKills', winPlayer, winChall)}
+                                    ${renderKillRow('tripleKills', winPlayer, winChall)}
+                                    ${renderKillRow('quadraKills', winPlayer, winChall)}
+                                    ${renderKillRow('pentaKills', winPlayer, winChall)}
+                                </div>
+                            </div>
+                        ` : ''}
+
+                        <!-- LOOSE Stats -->
+                        ${loosePlayer ? `
+                            <div>
+                                <h4 class="text-lol-failure font-bold mb-2">LOOSE</h4>
+                                <div class="space-y-2 pl-4 border-l-2 border-lol-failure">
+                                    ${renderKillRow('doubleKills', loosePlayer, looseChall)}
+                                    ${renderKillRow('tripleKills', loosePlayer, looseChall)}
+                                    ${renderKillRow('quadraKills', loosePlayer, looseChall)}
+                                    ${renderKillRow('pentaKills', loosePlayer, looseChall)}
+                                </div>
+                            </div>
+                        ` : ''}
+                    </div>
+                `;
+            }).join('');
+
+            return `
+                <div class="mb-8">
+                    <div class="flex items-center gap-3 mb-6 border-b-2 border-lol-gold/50 pb-2">
+                        <h2 class="text-3xl font-bold text-lol-gold">${sectionTitle}</h2>
+                        <img src="${section_illustration}" alt="Icon" class="w-16 h-16">
+                    </div>
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                        ${championCards}
+                    </div>
+                </div>
+            `;
+        }
+
+        /**
+         * Renders the Game Duration section in a table format as requested.
+         */
+        function renderGameDurationSection(sectionData, sectionTitle, section_illustration) {
+            if (!sectionData || !sectionData.player_duration || !sectionData.chall_duration) return '';
+
+            const playerRows = sectionData.player_duration.map(p => `
+                <tr class="border-b border-gray-700">
+                    <td class="p-3 text-sm uppercase">${p.lane}</td>
+                    <td class="p-3 ${p.win ? 'text-lol-success' : 'text-lol-failure'} font-bold">
+                        ${p.win ? 'WIN' : 'LOOSE'}
+                    </td>
+                    <td class="p-3 font-mono">${p.average.toFixed(2)}</td>
+                    <td class="p-3 font-mono">${p.q1.toFixed(2)}</td>
+                    <td class="p-3 font-mono">${p.median.toFixed(2)}</td>
+                    <td class="p-3 font-mono">${p.q3.toFixed(2)}</td>
+                </tr>
+            `).join('');
+
+            const chall = sectionData.chall_duration;
+
+            return `
+                <div class="mb-8">
+                    <div class="flex items-center gap-3 mb-6 border-b-2 border-lol-gold/50 pb-2">
+                        <h2 class="text-3xl font-bold text-lol-gold">${sectionTitle}</h2>
+                        <img src="${section_illustration}" alt="Icon" class="w-16 h-16">
+                    </div>
+                    <div class="bg-lol-card p-4 sm:p-6 rounded-lg shadow-xl overflow-x-auto">
+                        <table class="min-w-full text-left">
+                            <thead class="border-b border-lol-gold/50">
+                                <tr>
+                                    <th class="p-3 uppercase">Lane</th>
+                                    <th class="p-3 uppercase">Win</th>
+                                    <th class="p-3 uppercase">Avg</th>
+                                    <th class="p-3 uppercase">Q1</th>
+                                    <th class="p-3 uppercase">Median</th>
+                                    <th class="p-3 uppercase">Q3</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                ${playerRows}
+                                <!-- Challenger Row -->
+                                <tr class="bg-lol-gold/10">
+                                    <td class="p-3 font-bold text-lol-gold uppercase">Challenger</td>
+                                    <td class="p-3 text-lol-gold opacity-80">ALL</td>
+                                    <td class="p-3 font-mono font-bold text-lol-gold">${chall.average.toFixed(2)}</td>
+                                    <td class="p-3 font-mono font-bold text-lol-gold">${chall.q1.toFixed(2)}</td>
+                                    <td class="p-3 font-mono font-bold text-lol-gold">${chall.median.toFixed(2)}</td>
+                                    <td class="p-3 font-mono font-bold text-lol-gold">${chall.q3.toFixed(2)}</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            `;
+        }
+
+        /** Renders the Surrender Curve chart using Chart.js */
+        function renderSurrenderChart(playerCurveData, challengerCurveData) {
+            const playerCurve = playerCurveData;
+            const topCurve = challengerCurveData;
+
+            if (!playerCurve || playerCurve.length === 0) return;
+
+            const labels = playerCurve.map(p => `Min ${p[0]}`);
+            const playerData = playerCurve.map(p => p[1]);
+            const topData = topCurve.map(p => p[1]);
+
+            const ctx = document.getElementById('surrenderCurveChart');
+            if (!ctx) return;
+
+            // Destroy existing chart instance if it exists to prevent drawing issues
+            if (window.surrenderChartInstance) {
+                window.surrenderChartInstance.destroy();
+            }
+
+            // --- CHART COLOR FIX ---
+            // Get computed styles to ensure Chart.js uses the theme colors
+            const styles = getComputedStyle(document.documentElement);
+            const textColor = styles.getPropertyValue('--text-primary').trim() || '#F0E6D2';
+            const goldColor = styles.getPropertyValue('--accent-gold').trim() || '#C8AA6E';
+            const successColor = styles.getPropertyValue('--success-green').trim() || '#53A653';
+            const champColor = styles.getPropertyValue('--champ-display').trim() || '#CE7A42';
+            const gridColor = '#3d4a5c50'; // Default grid color
+
+            window.surrenderChartInstance = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: labels,
+                    datasets: [
+                        {
+                            label: 'Your Surrender Rate (%)',
+                            data: playerData,
+                            borderColor: champColor, // Use computed color
+                            backgroundColor: 'rgba(206, 122, 66, 0.2)',
+                            tension: 0.4,
+                            fill: false,
+                        },
+                        {
+                            label: 'Challenger Surrender Rate (%)',
+                            data: topData,
+                            borderColor: goldColor, // Use computed color
+                            backgroundColor: 'rgba(200, 170, 110, 0.2)',
+                            tension: 0.4,
+                            fill: false,
+                        }
+                    ]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {
+                        legend: {
+                            labels: { color: textColor } // Use computed color
+                        },
+                        title: {
+                            display: true,
+                            text: 'Cumulative Surrender Percentage by Game Minute',
+                            color: goldColor, // Use computed color
+                            font: { size: 16 }
+                        }
+                    },
+                    scales: {
+                        x: {
+                            title: {
+                                display: true,
+                                text: 'Game Minute',
+                                color: textColor // Use computed color
+                            },
+                            ticks: { color: textColor }, // Use computed color
+                            grid: { color: gridColor }
+                        },
+                        y: {
+                            title: {
+                                display: true,
+                                text: 'Cumulative Surrendered Games (%)',
+                                color: textColor // Use computed color
+                            },
+                            ticks: { color: textColor }, // Use computed color
+                            grid: { color: gridColor }
+                        }
+                    }
+                }
+            });
+        }
+
+        /** Renders the Pro Tips section. */
+        function renderTipsSection(tips, sectionTitle, section_illustration) {
+
+            let tipList = [];
+
+            // 1. Process the data structure: Object -> Array of values
+            if (tips && typeof tips === 'object' && !Array.isArray(tips)) {
+                // If it's an object like {"tips1": "tipText1", "tips2": "tipText2", ...}
+                // We extract all the values and ensure they are sorted by key (tips1, tips2, etc.)
+                tipList = Object.keys(tips)
+                    .sort()
+                    .map(key => tips[key]);
+            } else if (Array.isArray(tips)) {
+                // Handle the fallback (shouldn't happen with the current API structure, but good for robustness)
+                tipList = tips;
+            } else {
+                 // No valid data to render
+                 return '';
+            }
+
+            if (tipList.length === 0) return '';
+
+            // 2. Render the list
+            const tipListHTML = tipList.map((tip, index) => `
+                <li class="flex items-start space-x-3 p-3 bg-gray-800/50 rounded-lg shadow-inner border border-gray-700">
+                    <!-- Icon/Number -->
+                    <span class="text-xl font-bold text-lol-gold flex-shrink-0 mt-0.5">
+                        <!-- Custom styled number bubble (as seen in the tips.png mockup) -->
+                        <span class="w-6 h-6 flex items-center justify-center rounded-full bg-lol-gold text-lol-bg text-sm">
+                            ${index + 1}
+                        </span>
+                    </span>
+                    <p class="text-lol-text leading-relaxed">${tip}</p>
+                </li>
+            `).join('');
+
+            // 3. Render the final section with the requested aesthetic elements
+            return `
+                <div class="mb-8">
+                    <div class="flex items-center gap-2 mb-6 border-b-2 border-lol-gold/50 pb-2">
+                        <h2 class="text-3xl font-bold text-lol-gold">${sectionTitle}</h2>
+                        <img src="${section_illustration}" alt="Icon" class="w-16 h-16">
+                    </div>
+
+                    <div class="bg-lol-card p-6 rounded-lg shadow-2xl relative overflow-hidden">
+
+                        <!-- Decorative Header -->
+                        <h3 class="text-2xl font-semibold text-lol-text mb-6">
+                            Level up your game today!
+                        </h3>
+
+                        <!-- List of Tips -->
+                        <ul class="space-y-4 list-none pl-0">
+                            ${tipListHTML}
+                        </ul>
+                    </div>
+                </div>
+            `;
+        }
+
+
+        // --- RENDER FUNCTIONS (PAGES) ---
+
+        function renderHomePage() {
+            appDiv.innerHTML = `
+                <div class="min-h-screen flex flex-col justify-center items-center p-4">
+                    <h1 class="text-4xl sm:text-6xl font-extrabold text-center text-lol-gold mb-8 tracking-wider">
+                        RUNETERRA PERFORMANCE REVIEW
+                    </h1>
+
+                    <div class="w-full max-w-4xl mb-8">
+                        <img src="https://riot-recommendation-webpages.s3.us-east-1.amazonaws.com/webpages/illustrations/homepage_illustration.png"
+                             class="w-full h-auto rounded-xl shadow-2xl">
+                    </div>
+
+                    <form id="search-form" class="bg-lol-card p-8 rounded-xl shadow-2xl w-full max-w-xl">
+                        <p id="error-message" class="text-lol-failure mb-4 text-center ${currentState.error ? '' : 'hidden'}">
+                            ${currentState.error || ''}
+                        </p>
+
+                        <div class="flex flex-col sm:flex-row gap-4 mb-6">
+                            <!-- Player Name -->
+                            <div class="flex-grow">
+                                <label for="username" class="block text-sm font-medium text-lol-text mb-1">Game Username</label>
+                                <input type="text" id="username" name="username" required
+                                       placeholder="Enter Summoner Name"
+                                       class="w-full p-3 rounded-lg input-style focus:ring-2 focus:ring-lol-gold">
+                            </div>
+
+                            <!-- Tag -->
+                            <div class="w-24">
+                                <label for="tag" class="block text-sm font-medium text-lol-text mb-1">Tag</label>
+                                <input type="text" id="tag" name="tag" required
+                                       placeholder="TAG"
+                                       class="w-full p-3 rounded-lg input-style focus:ring-2 focus:ring-lol-gold">
+                            </div>
+
+                            <!-- Region -->
+                            <div class="w-full sm:w-32">
+                                <label for="region" class="block text-sm font-medium text-lol-text mb-1">Region</label>
+                                <select id="region" name="region" required
+                                        class="w-full p-3 rounded-lg input-style focus:ring-2 focus:ring-lol-gold appearance-none cursor-pointer">
+                                    ${REGIONS.map(r => `<option value="${r}">${r.toUpperCase()}</option>`).join('')}
+                                </select>
+                            </div>
+                        </div>
+
+                        <!-- Submit Button -->
+                        <button type="submit" id="validate-button"
+                            class="w-full p-3 mt-4 rounded-lg bg-lol-gold text-lol-bg font-bold text-lg
+                                   hover:bg-opacity-90 transition-all shadow-md gold-glow
+                                   flex items-center justify-center disabled:opacity-50"
+                            ${currentState.loading ? 'disabled' : ''}>
+                            ${currentState.loading ?
+                                `<svg class="animate-spin -ml-1 mr-3 h-5 w-5 text-lol-bg" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                                    <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                                    <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                                </svg> Rallying the data from the Rift...`
+                                : 'SEARCH FOR GLORY'}
+                        </button>
+                    </form>
+                </div>
+            `;
+
+            // Attach event listener
+            document.getElementById('search-form').addEventListener('submit', function(e) {
+                e.preventDefault();
+                const username = e.target.username.value;
+                const tag = e.target.tag.value;
+                const region = e.target.region.value;
+                fetchPlayerStats(username, tag, region);
+            });
+        }
+
+        function renderResultsPage() {
+            const data = currentState.playerData;
+            if (!data) return navigate('home');
+
+            const { username, tag, keyHighlights, surrenders, tips } = data;
+            // Updated path for nested keyHighlights
+            const topChampions = keyHighlights?.keyHighlights?.topChampions || [];
+
+            // 1. Top Champion Highlights Section
+            const championCards = topChampions.map((c, index) => `
+                <div class="bg-lol-card p-4 rounded-xl shadow-lg border-t-4 border-lol-gold/50 text-center flex flex-col items-center">
+                    <span class="text-xs uppercase text-gray-400 mb-2">${index === 1 ? '🥇 Most Played' : (index === 0 ? '🥈 2nd Most Played' : '🥉 3rd Most Played')}</span>
+                    <img src="https://riot-recommendation-webpages.s3.us-east-1.amazonaws.com/webpages/champions_icons/${c.champion}.png"
+                         alt="${c.champion} icon" class="w-16 h-16 rounded-full border-2 border-lol-gold mb-3">
+                    <h3 class="text-xl font-bold text-lol-text">${c.champion}</h3>
+                    <p class="text-sm text-lol-gold uppercase">${c.lane}</p>
+                    <div class="mt-3 text-sm">
+                        <p class="font-semibold text-lol-champ">${c.winRate?.toFixed(1) || '--'}% WR</p>
+                        <p class="text-gray-400">${c.totalGames || 0} Games</p>
+                    </div>
+                </div>
+            `).join('');
+
+
+            // 2. Core Statistical Sections
+            let coreSectionsHTML = '';
+            for (const sectionKey of Object.keys(METRIC_TITLES)) {
+                if (sectionKey === 'surrenders' || sectionKey === 'tips') continue; // Handled separately
+
+                const sectionData = data[sectionKey];
+                // Skip rendering if the main section data is missing
+                if (!sectionData || Object.keys(sectionData).length === 0) continue;
+
+                const sectionTitle = METRIC_TITLES[sectionKey].title;
+                const metrics = METRIC_TITLES[sectionKey].metrics;
+                const section_illustration = METRIC_TITLES[sectionKey]?.section_illustration ?? null
+
+                let metricsHTML = '';
+                let hasMetricData = false;
+
+                // --- CUSTOM RENDER LOGIC ---
+                if (sectionKey === 'multiKills') {
+                    coreSectionsHTML += renderMultiKillsSection(sectionData, sectionTitle, section_illustration);
+                    hasMetricData = true; // Flag that we added content
+                } else if (sectionKey === 'gameDuration') {
+                    coreSectionsHTML += renderGameDurationSection(sectionData, sectionTitle, section_illustration);
+                    hasMetricData = true; // Flag that we added content
+                } else {
+                    // --- Standard Metric Renderer (for Pings, KDA, Damage) ---
+                    for (const metricKey in metrics) {
+                        const championStats = sectionData[metricKey];
+                        // Render comparison only if specific metric data exists
+                        if (championStats && championStats.length > 0) {
+                            hasMetricData = true;
+                            metricsHTML += renderComparisonMetric(metricKey, championStats, metrics[metricKey]);
+                        }
+                    }
+
+                    // Render the main section card only if at least one metric sub-section was generated
+                    if (hasMetricData) {
+                         coreSectionsHTML += `
+                            <div class="mb-8">
+                                <h2 class="text-3xl font-bold text-lol-gold mb-6 border-b-2 border-lol-gold/50 pb-2">${sectionTitle}</h2>
+                                <div class="space-y-6">
+                                    ${metricsHTML}
+                                </div>
+                            </div>
+                        `;
+                    }
+                }
+            }
+
+
+            // 3. Surrenders Section
+            let surrendersHTML = '';
+            if (surrenders && surrenders.playerStats && surrenders.challengerStats) {
+                const player = surrenders.playerStats;
+                const chall = surrenders.challengerStats;
+
+                surrendersHTML = `
+                    <div class="mb-8">
+                        <div class="flex items-center gap-2 mb-6 border-b-2 border-lol-gold/50 pb-2">
+                            <h2 class="text-3xl font-bold text-lol-gold">${METRIC_TITLES.surrenders.title}</h2>
+                            <img src="${METRIC_TITLES.surrenders.section_illustration}" alt="Icon" class="w-16 h-16">
+                        </div>
+
+                        <!-- Summary Card (New Layout) -->
+                        <div class="bg-lol-card p-6 rounded-lg shadow-xl text-center mb-8">
+
+                            <!-- Total Games Played -->
+                            <div class="mb-6">
+                                <p class="text-gray-400 uppercase text-lg">Total Games Played</p>
+                                <p class="text-4xl font-bold text-lol-text">${player.totalGames || 0}</p>
+                            </div>
+
+                            <!-- Stacked container for the two sub-cards -->
+                            <div class="max-w-md mx-auto space-y-4">
+
+                                <!-- Block 1: Games FF (Subcard) -->
+                                <div class="bg-gray-800/50 p-4 rounded-lg">
+                                    <h4 class="text-lg font-semibold text-lol-text mb-3">Games Surrendered</h4>
+                                    <div class="space-y-2 text-left">
+                                        <div class="flex justify-between items-center">
+                                            <span class="text-lol-champ">Your Rate:</span>
+                                            <span class="text-lol-champ font-bold text-xl">${(player.percentageGamesSurrendered || 0).toFixed(1)}%</span>
+                                        </div>
+                                        <div class="flex justify-between items-center">
+                                            <span class="text-lol-gold">Challenger Rate:</span>
+                                            <span class="text-lol-gold font-bold text-xl">${(chall.percentageGamesSurrendered || 0).toFixed(1)}%</span>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <!-- Block 2: Surrender Timing (Subcard) -->
+                                <div class="bg-gray-800/50 p-4 rounded-lg">
+                                    <h4 class="text-lg font-semibold text-lol-text mb-3">Surrender Timing</h4>
+                                    <div class="space-y-2 text-left">
+                                        <div class="flex justify-between items-center">
+                                            <span>Before 20 min:</span>
+                                            <span class="font-mono">
+                                                <span class="text-lol-champ font-bold">${(player.percentageSurrenders15To20 || 0).toFixed(1)}%</span>
+                                                <span class="text-gray-500 mx-1">/</span>
+                                                <span class="text-lol-gold font-bold">${(chall.percentageSurrenders15To20 || 0).toFixed(1)}%</span>
+                                            </span>
+                                        </div>
+                                        <div class="flex justify-between items-center">
+                                            <span>After 20 min:</span>
+                                            <span class="font-mono">
+                                                <span class="text-lol-champ font-bold">${(player.percentageSurrendersAfter20 || 0).toFixed(1)}%</span>
+                                                <span class="text-gray-500 mx-1">/</span>
+                                                <span class="text-lol-gold font-bold">${(chall.percentageSurrendersAfter20 || 0).toFixed(1)}%</span>
+                                            </span>
+                                        </div>
+                                    </div>
+                                </div>
+
+                            </div>
+
+                        </div>
+
+                        <!-- Chart Canvas -->
+                        <div class="bg-lol-card p-6 rounded-lg shadow-xl h-96">
+                            <canvas id="surrenderCurveChart"></canvas>
+                        </div>
+                    </div>
+                `;
+            }
+
+            // 4. Tips Section (New)
+            const tipsHTML = renderTipsSection(tips, METRIC_TITLES.tips.title, METRIC_TITLES.tips.section_illustration);
+
+
+            // Final Render
+            appDiv.innerHTML = `
+                <div class="py-8">
+                    <div class="flex flex-col sm:flex-row justify-between items-center mb-10 border-b border-gray-700 pb-4">
+                        <h1 class="text-3xl sm:text-4xl font-extrabold text-lol-text">
+                            ${username}<span class="text-lol-gold">#${tag}</span> - 2025 Year in Review
+                        </h1>
+                        <button onclick="navigate('home')"
+                                class="mt-4 sm:mt-0 px-4 py-2 rounded-lg bg-gray-600 text-lol-text hover:bg-gray-500 transition-colors">
+                            &larr; New Search
+                        </button>
+                    </div>
+
+                    <!-- Top Champions Section -->
+                    <div class="grid grid-cols-1 sm:grid-cols-3 gap-6 mb-12">
+                        ${championCards}
+                    </div>
+
+                    <!-- Core Statistical Sections -->
+                    ${coreSectionsHTML || '<p class="text-center text-gray-500 mt-12">No detailed game statistics found for this player.</p>'}
+
+                    <!-- Surrenders Section -->
+                    ${surrendersHTML}
+
+                    <!-- Tips Section (New) -->
+                    ${tipsHTML}
+
+                </div>
+            `;
+
+            // Post-render setup for the chart
+            if (surrenders && surrenders.playerStats && surrenders.playerStats.SurrenderCurve) {
+                renderSurrenderChart(surrenders.playerStats.SurrenderCurve, surrenders.challengerStats.SurrenderCurve);
+            }
+        }
+
+        // --- MAIN RENDER LOOP ---
+
+        function renderApp() {
+            if (currentState.view === 'home') {
+                renderHomePage();
+            } else if (currentState.view === 'results') {
+                renderResultsPage();
+            }
+        }
+
+        // Initial call
+        document.addEventListener('DOMContentLoaded', () => {
+            renderApp();
+        });
+
+    </script>
+</body>
+</html>
